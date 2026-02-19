@@ -196,10 +196,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    #powershell環境からキーを取得する
     global CLIENT_ID, CLIENT_SECRET
     CLIENT_ID = require_env("GITHUB_CLIENT_ID")
     CLIENT_SECRET = require_env("GITHUB_CLIENT_SECRET")
 
+    #
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     httpd.socket = build_ssl_context().wrap_socket(httpd.socket, server_side=True)
 
