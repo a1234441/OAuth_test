@@ -45,8 +45,8 @@ def require_env(name: str) -> str:
     return v
 
 
-CLIENT_ID = "Ov23cttUBu9USjtWN0uF"
-CLIENT_SECRET = "2177228af48668a1443a664d07e6a299779e1e7a"
+CLIENT_ID = ""
+CLIENT_SECRET = ""
 
 # ===== In-memory state/token (no persistence) =====
 EXPECTED_STATE: Optional[str] = None
