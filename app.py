@@ -201,10 +201,11 @@ def main() -> None:
     CLIENT_ID = require_env("GITHUB_CLIENT_ID")
     CLIENT_SECRET = require_env("GITHUB_CLIENT_SECRET")
 
-    #
+    #待ち受け側のHttpサーバーの作成とhttps化させる
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     httpd.socket = build_ssl_context().wrap_socket(httpd.socket, server_side=True)
 
+    #サーバーを止めるまで動かし続ける
     print(f"Serving on {BASE_URL}")
     print("Open the URL in your browser -> click 'Login with GitHub'.")
     try:
