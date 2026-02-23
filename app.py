@@ -153,14 +153,9 @@ class Handler(BaseHTTPRequestHandler):
         q = urllib.parse.parse_qs(u.query)
 
         if path == "/login":
-            # state は CSRF 対策用の使い捨てランダム値
             state = secrets.token_urlsafe(32)
-
-            # PKCE (S256)
             verifier = pkce_generate_verifier()
             challenge = pkce_challenge_s256(verifier)
-
-            # state をキーに verifier を保持
             SESSIONS[state] = {"verifier": verifier, "ts": str(_now())}
 
             params = {
@@ -177,13 +172,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/callback":
             # error handling
             err = (q.get("error") or [""])[0]
+            code = (q.get("code") or [""])[0]
+            state = (q.get("state") or [""])[0]
+            verifier = info.get("verifier", "")
+
             if err:
                 desc = (q.get("error_description") or [""])[0]
                 self._html(HTTPStatus.BAD_REQUEST, f"<h1>OAuth Error</h1><p>{html.escape(err)} {html.escape(desc)}</p>")
                 return
 
-            code = (q.get("code") or [""])[0]
-            state = (q.get("state") or [""])[0]
             if not code or not state:
                 self._html(HTTPStatus.BAD_REQUEST, "<h1>Missing code/state</h1>")
                 return
@@ -194,7 +191,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._html(HTTPStatus.FORBIDDEN, "<h1>Invalid state (CSRF suspected)</h1>")
                 return
 
-            verifier = info.get("verifier", "")
             if not verifier:
                 self._html(HTTPStatus.INTERNAL_SERVER_ERROR, "<h1>PKCE verifier missing</h1>")
                 return
