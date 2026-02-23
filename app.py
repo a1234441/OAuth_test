@@ -6,6 +6,11 @@ Step1: GitHub OAuth Authorization Code Flow
   - /       : Home
   - /login  : Redirect to GitHub authorize endpoint
   - /callback : Validate state, exchange code for access token
+
+コマンド
+  openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes `
+  -keyout certs\localhost.key -out certs\localhost.crt `
+  -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost"
 """
 
 from __future__ import annotations
@@ -59,6 +64,7 @@ def mask_token(token: str) -> str:
     return token[:6] + "*" * (len(token) - 10) + token[-4:]
 
 
+#HTTPS通信をするために必要な証明書と秘密鍵を読み込んで、TLS(SSL)設定オブジェクトを作って返す
 def build_ssl_context() -> ssl.SSLContext:
     if not (os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE)):
         raise RuntimeError(
@@ -66,133 +72,92 @@ def build_ssl_context() -> ssl.SSLContext:
             f"Expected:\n  {CERT_FILE}\n  {KEY_FILE}\n"
             "Create them with OpenSSL (see instructions)."
         )
+    #サーバ側(localhost:8443)のTSL設定を作る
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    #ctxに秘密鍵と証明書(TSL)を読み込む
     ctx.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
     return ctx
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt: str, *args) -> None:
-        sys.stderr.write("[%s] %s\n" % (self.address_string(), fmt % args))
-
-    def send_html(self, status: int, body: str) -> None:
+    def _html(self, status: int, body: str) -> None:
         data = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
-    def redirect(self, location: str) -> None:
-        self.send_response(HTTPStatus.FOUND)
-        self.send_header("Location", location)
+    def _redirect(self, url: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", url)
         self.end_headers()
 
-    def route_path(self) -> str:
-        return urllib.parse.urlparse(self.path).path
-
-    def parse_query(self) -> Dict[str, str]:
-        parsed = urllib.parse.urlparse(self.path)
-        qs = urllib.parse.parse_qs(parsed.query)
-        return {k: (v[0] if v else "") for k, v in qs.items()}
-
     def do_GET(self) -> None:
-        p = self.route_path()
-        if p == "/":
-            self.handle_home()
-        elif p == "/login":
-            self.handle_login()
-        elif p == "/callback":
-            self.handle_callback()
-        else:
-            self.send_html(HTTPStatus.NOT_FOUND, "<h1>404</h1>")
-
-    def handle_home(self) -> None:
-        status = "✅ token acquired" if ACCESS_TOKEN else "❌ no token"
-        token_view = html.escape(mask_token(ACCESS_TOKEN)) if ACCESS_TOKEN else ""
-        body = f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>OAuth Step1</title></head>
-<body>
-  <h1>OAuth Step1</h1>
-  <p>Status: {status}</p>
-  <p>Token: {token_view}</p>
-  <ul>
-    <li><a href="/login">Login with GitHub</a></li>
-  </ul>
-  <hr>
-  <p style="color:#666;">{html.escape(BASE_URL)}</p>
-</body></html>"""
-        self.send_html(HTTPStatus.OK, body)
-
-    def handle_login(self) -> None:
-        global EXPECTED_STATE
-        # CSRF対策: 推測困難なstate生成 → callbackで一致検証
-        EXPECTED_STATE = secrets.token_urlsafe(32)
-
-        params = {
-            "client_id": CLIENT_ID,
-            "redirect_uri": REDIRECT_URI,
-            "scope": SCOPE,
-            "state": EXPECTED_STATE,
-        }
-        url = AUTHORIZE_URL + "?" + urllib.parse.urlencode(params)
-        self.redirect(url)
-
-    def handle_callback(self) -> None:
         global EXPECTED_STATE, ACCESS_TOKEN
 
-        q = self.parse_query()
-        err = q.get("error", "")
-        if err:
-            desc = q.get("error_description", "")
-            self.send_html(
-                HTTPStatus.BAD_REQUEST,
-                f"<h1>OAuth Error</h1><p>{html.escape(err)} {html.escape(desc)}</p>",
-            )
-            return
+        u = urllib.parse.urlsplit(self.path)
+        path = u.path
+        q = urllib.parse.parse_qs(u.query)
 
-        code = q.get("code", "")
-        state = q.get("state", "")
-
-        if not code or not state:
-            self.send_html(HTTPStatus.BAD_REQUEST, "<h1>Missing code/state</h1>")
-            return
-
-        if not EXPECTED_STATE or not secrets.compare_digest(state, EXPECTED_STATE):
-            # state不一致 → CSRF/リプレイ疑い
-            self.send_html(HTTPStatus.FORBIDDEN, "<h1>Invalid state (CSRF suspected)</h1>")
-            return
-
-        # code → access_token 交換
-        try:
-            headers = {"Accept": "application/json", "User-Agent": "oauth-step1/1.0"}
-            data = {
+        if path == "/login":
+            EXPECTED_STATE = secrets.token_urlsafe(32)
+            params = {
                 "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-                "code": code,
                 "redirect_uri": REDIRECT_URI,
-                "state": state,
+                "scope": SCOPE,
+                "state": EXPECTED_STATE,
             }
-            r = requests.post(TOKEN_URL, data=data, headers=headers, timeout=15)
-            r.raise_for_status()
-            token_json = r.json()
-            if "error" in token_json:
-                raise RuntimeError(str(token_json))
+            self._redirect(AUTHORIZE_URL + "?" + urllib.parse.urlencode(params))
+            return
 
-            ACCESS_TOKEN = token_json.get("access_token")
-            # 使い捨てのstateは破棄（リプレイ耐性）
-            EXPECTED_STATE = None
+        if path == "/callback":
+            # error handling
+            err = (q.get("error") or [""])[0]
+            if err:
+                desc = (q.get("error_description") or [""])[0]
+                self._html(400, f"<h1>OAuth Error</h1><p>{html.escape(err)} {html.escape(desc)}</p>")
+                return
 
-            if ACCESS_TOKEN:
-                # デモ用にフルtokenはコンソール出力（提出/本番なら出さない方針でもOK）
-                print("ACCESS_TOKEN:", ACCESS_TOKEN)
+            code = (q.get("code") or [""])[0]
+            state = (q.get("state") or [""])[0]
+            if not code or not state:
+                self._html(400, "<h1>Missing code/state</h1>")
+                return
 
-            self.redirect("/")
-        except Exception as e:
-            self.send_html(
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                f"<h1>Token exchange failed</h1><pre>{html.escape(str(e))}</pre>",
-            )
+            if not EXPECTED_STATE or not secrets.compare_digest(state, EXPECTED_STATE):
+                self._html(403, "<h1>Invalid state (CSRF suspected)</h1>")
+                return
+
+            try:
+                headers = {"Accept": "application/json", "User-Agent": "oauth-step1/1.0"}
+                data = {
+                    "client_id": CLIENT_ID,
+                    "client_secret": CLIENT_SECRET,
+                    "code": code,
+                    "redirect_uri": REDIRECT_URI,
+                    "state": state,
+                }
+                r = requests.post(TOKEN_URL, data=data, headers=headers, timeout=15)
+                r.raise_for_status()
+                token_json = r.json()
+                if "error" in token_json:
+                    raise RuntimeError(str(token_json))
+
+                ACCESS_TOKEN = token_json.get("access_token")
+                EXPECTED_STATE = None  # 使い捨て
+                self._html(
+                    200,
+                    "<h1>OK</h1>"
+                    f"<p>token: {html.escape(ACCESS_TOKEN[:6] + '...' if ACCESS_TOKEN else '')}</p>"
+                    '<p><a href="/">Back</a></p>',
+                )
+            except Exception as e:
+                self._html(500, f"<h1>Token exchange failed</h1><pre>{html.escape(str(e))}</pre>")
+            return
+
+        # default (/)
+        status = "token acquired" if ACCESS_TOKEN else "no token"
+        self._html(200, f"<h1>OAuth Step1</h1><p>{status}</p><a href='/login'>Login with GitHub</a>")
 
 
 def main() -> None:
@@ -201,8 +166,9 @@ def main() -> None:
     CLIENT_ID = require_env("GITHUB_CLIENT_ID")
     CLIENT_SECRET = require_env("GITHUB_CLIENT_SECRET")
 
-    #待ち受け側のHttpサーバーの作成とhttps化させる
+    #待ち受け側のHttpサーバーの作成
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    #作ったサーバーをhttpsにする
     httpd.socket = build_ssl_context().wrap_socket(httpd.socket, server_side=True)
 
     #サーバーを止めるまで動かし続ける
